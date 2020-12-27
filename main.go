@@ -10,17 +10,16 @@ import (
 )
 
 func main() {
+	// runtime.GOMAXPROCS(1) Uncomment this in case you want test with one processor
 	start := time.Now()
 
-	eChan := make(chan *Order)
-	tChan := make(chan *Order)
-	done := make(chan bool)
+	c := make(chan Order)
+	// done := make(chan bool)  load func does not have to run in a separate goroutine
 
-	go extract(eChan)
-	go transform(eChan, tChan)
-	go load(tChan, done)
+	go transform(c)
+	load(c)
 
-	<-done
+	// <-done
 	fmt.Println(time.Since(start))
 }
 
@@ -41,33 +40,15 @@ type Order struct {
 	UnitPrice float64
 }
 
-func extract(eChan chan *Order) {
-	f, _ := os.Open("./orders.txt")
-	defer f.Close()
+func transform(c chan Order) {
+	pf, _ := os.Open("./productList.txt")
+	defer pf.Close()
 
-	r := csv.NewReader(f)
-
-	for record, err := r.Read(); err == nil; record, err = r.Read() {
-		o := new(Order)
-		o.CustomerNumber, _ = strconv.Atoi(record[0])
-		o.PartNumber = record[1]
-		o.Quantity, _ = strconv.Atoi(record[2])
-
-		eChan <- o
-	}
-
-	close(eChan)
-}
-
-func transform(eChan, tChan chan *Order) {
-	f, _ := os.Open("./productList.txt")
-	defer f.Close()
-
-	r := csv.NewReader(f)
-	records, _ := r.ReadAll()
+	pr := csv.NewReader(pf)
+	prs, _ := pr.ReadAll()
 	productList := make(map[string]*Product)
 
-	for _, r := range records {
+	for _, r := range prs {
 		p := new(Product)
 		p.PartNumber = r[0]
 		p.UnitCost, _ = strconv.ParseFloat(r[1], 64)
@@ -76,33 +57,45 @@ func transform(eChan, tChan chan *Order) {
 	}
 
 	var wg sync.WaitGroup
-	for o := range eChan {
+
+	of, _ := os.Open("./orders.txt")
+	defer of.Close()
+
+	or := csv.NewReader(of)
+	for record, err := or.Read(); err == nil; record, err = or.Read() {
 		wg.Add(1)
-		go func(o *Order) {
+
+		go func(record []string){
 			time.Sleep(3 * time.Millisecond)
+
+			o := new(Order)
+			o.CustomerNumber, _ = strconv.Atoi(record[0])
+			o.PartNumber = record[1]
+			o.Quantity, _ = strconv.Atoi(record[2])
 			o.UnitCost = productList[o.PartNumber].UnitCost
 			o.UnitPrice = productList[o.PartNumber].UnitPrice
-			tChan <- o
-			defer wg.Done()
-		}(o)
-	}
 
+			c <- *o
+			defer wg.Done()
+		}(record)
+
+	}
 	wg.Wait()
-	close(tChan)
+	close(c)
 
 }
 
-func load(tChan chan *Order, done chan bool) {
+func load(c chan Order) {
 	f, _ := os.Create("./dest.txt")
 	defer f.Close()
 
 	fmt.Fprintf(f, "%20s%16s%13s%13s%16s%16s", "Part Number", "Quantity",
 		"Unit Cost", "Unit Price", "Total Cost", "Total Price\n")
 
-	var wg sync.WaitGroup
-	for o := range tChan {
+	var wg sync.WaitGroup // Used just to not return before end of last row
+	for o := range c {
 		wg.Add(1)
-		go func(o *Order) {
+		go func(o Order) {
 			time.Sleep(1 * time.Millisecond)
 			fmt.Fprintf(f, "%20s %15d %12.2f %12.2f %15.2f%15.2f\n",
 				o.PartNumber, o.Quantity, o.UnitCost, o.UnitPrice,
@@ -112,5 +105,7 @@ func load(tChan chan *Order, done chan bool) {
 	}
 
 	wg.Wait()
-	done <- true
+
+
+
 }
